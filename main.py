@@ -1,12 +1,13 @@
 from fastapi import FastAPI
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from datetime import time
 import database
 from routers import auth, bookings
 
 
-@contextmanager
-def lifespan(app: FastAPI):
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print('Запуск')
     database.ROOMS_DB.clear()
     database.SLOTS_DB.clear()
 
