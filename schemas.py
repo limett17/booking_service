@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from datetime import date, time
 
 
@@ -13,8 +13,7 @@ class UserOut(BaseModel):
     username: str
     role: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class Token(BaseModel):
@@ -26,8 +25,7 @@ class RoomOut(BaseModel):
     id: int
     name: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SlotOut(BaseModel):
@@ -36,8 +34,7 @@ class SlotOut(BaseModel):
     start_time: time
     end_time: time
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SlotAvailabilityOut(BaseModel):
@@ -56,7 +53,6 @@ class BookingOut(BaseModel):
     id: int
     slot_id: int
     user_id: int
-    date: date
+    booking_date: date
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
