@@ -45,3 +45,18 @@ class SlotAvailabilityOut(BaseModel):
     start_time: time
     end_time: time
     is_available: bool
+
+
+class BookingCreate(BaseModel):
+    slot_id: int
+    date: date
+
+
+class BookingOut(BaseModel):
+    id: int
+    slot_id: int
+    user_id: int
+    date: date
+
+    class Config:
+        from_attributes = True
