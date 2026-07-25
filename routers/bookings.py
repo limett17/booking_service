@@ -1,36 +1,52 @@
-from typing import List
+from fastapi import APIRouter, HTTPException, Depends, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, and_
 from datetime import date
+from typing import List
+
 import schemas
 import database
-
-from fastapi import APIRouter, HTTPException, Depends, status
+import models
 from routers.auth import get_current_user
-
 
 router = APIRouter(tags=["Bookings & Rooms"])
 
 
 @router.get("/rooms", response_model=List[schemas.RoomOut])
-def get_rooms():
-    return database.ROOMS_DB
+async def get_rooms(db: AsyncSession = Depends(database.get_db)):
+    """Возвращает список всех комнат из PostgreSQL"""
+    result = await db.execute(select(models.RoomModel))
+    return result.scalars().all()
 
 
 @router.get("/rooms/{room_id}/availability", response_model=List[schemas.SlotAvailabilityOut])
-def get_room_availability(room_id: int, booking_date: date):
-    room_exists = any(room["id"] == room_id for room in database.ROOMS_DB)
-    if not room_exists:
+async def get_room_availability(
+    room_id: int,
+    booking_date: date,
+    db: AsyncSession = Depends(database.get_db)
+):
+    """Формирует сетку слотов для комнаты на выбранную дату из БД"""
+    room_result = await db.execute(select(models.RoomModel).where(models.RoomModel.id == room_id))
+    if not room_result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Переговорная комната не найдена")
 
-    room_slots = [slot for slot in database.SLOTS_DB if slot["room_id"] == room_id]
-    booked_slot_ids = {b["slot_id"] for b in database.BOOKINGS_DB if b["date"] == booking_date}
+    slots_result = await db.execute(
+        select(models.SlotModel).where(models.SlotModel.room_id == room_id)
+    )
+    room_slots = slots_result.scalars().all()
+
+    bookings_result = await db.execute(
+        select(models.BookingModel.slot_id).where(models.BookingModel.booking_date == booking_date)
+    )
+    booked_slot_ids = set(bookings_result.scalars().all())
 
     result = []
     for slot in room_slots:
         result.append({
-            "slot_id": slot["id"],
-            "start_time": slot["start_time"],
-            "end_time": slot["end_time"],
-            "is_available": slot["id"] not in booked_slot_ids
+            "slot_id": slot.id,
+            "start_time": slot.start_time,
+            "end_time": slot.end_time,
+            "is_available": slot.id not in booked_slot_ids
         })
     return result
 
@@ -41,51 +57,59 @@ def read_users_me(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/bookings", response_model=schemas.BookingOut, status_code=status.HTTP_201_CREATED)
-def create_booking(booking_data: schemas.BookingCreate, current_user: dict = Depends(get_current_user)):
-    """
-    Создание бронирования. Доступно любому авторизованному пользователю.
-    """
-    slot_exists = any(slot["id"] == booking_data.slot_id for slot in database.SLOTS_DB)
-    if not slot_exists:
+async def create_booking(
+    booking_data: schemas.BookingCreate,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(database.get_db)
+):
+    """Создает бронирование в PostgreSQL с проверкой доступности"""
+    slot_result = await db.execute(
+        select(models.SlotModel).where(models.SlotModel.id == booking_data.slot_id)
+    )
+    if not slot_result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Указанный временной слот не найден")
 
-    for booking in database.BOOKINGS_DB:
-        if booking["slot_id"] == booking_data.slot_id and booking["date"] == booking_data.date:
-            raise HTTPException(
-                status_code=400,
-                detail="Этот временной слот на выбранную дату уже забронирован"
+    existing_booking_result = await db.execute(
+        select(models.BookingModel).where(
+            and_(
+                models.BookingModel.slot_id == booking_data.slot_id,
+                models.BookingModel.booking_date == booking_data.date
             )
+        )
+    )
+    if existing_booking_result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=400,
+            detail="Этот временной слот на выбранную дату уже забронирован"
+        )
 
-    new_booking = {
-        "id": database.booking_id_counter,
-        "slot_id": booking_data.slot_id,
-        "user_id": current_user["id"],
-        "date": booking_data.date
-    }
-    database.BOOKINGS_DB.append(new_booking)
-    database.booking_id_counter += 1
+    new_booking = models.BookingModel(
+        slot_id=booking_data.slot_id,
+        user_id=current_user["id"],
+        booking_date=booking_data.date
+    )
+    db.add(new_booking)
+    await db.commit()
+    await db.refresh(new_booking)
 
     return new_booking
 
 
 @router.delete("/bookings/{booking_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_booking(booking_id: int, current_user: dict = Depends(get_current_user)):
-    """
-    Удаление бронирования.
-    Сотрудник (employee) может удалить только свою бронь.
-    Администратор (admin) может удалить любую бронь.
-    """
-    booking_to_delete = None
-    for booking in database.BOOKINGS_DB:
-        if booking["id"] == booking_id:
-            booking_to_delete = booking
-            break
+async def delete_booking(
+    booking_id: int,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(database.get_db)
+):
+    """Удаление бронирования с проверкой ролей (сотрудник/админ)"""
+    result = await db.execute(select(models.BookingModel).where(models.BookingModel.id == booking_id))
+    booking_to_delete = result.scalar_one_or_none()
 
     if not booking_to_delete:
         raise HTTPException(status_code=404, detail="Бронирование не найдено")
 
-    is_owner = booking_to_delete["user_id"] == current_user["id"]
-    is_admin = current_user.get("role") == "admin"
+    is_owner = booking_to_delete.user_id == current_user["id"]
+    is_admin = current_user.get("role") == models.UserRole.ADMIN
 
     if not is_owner and not is_admin:
         raise HTTPException(
@@ -93,5 +117,6 @@ def delete_booking(booking_id: int, current_user: dict = Depends(get_current_use
             detail="Недостаточно прав для удаления этого бронирования"
         )
 
-    database.BOOKINGS_DB.remove(booking_to_delete)
+    await db.delete(booking_to_delete)
+    await db.commit()
     return
